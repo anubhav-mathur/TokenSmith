@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from src.config import RAGConfig
+from src.document_registry import DocumentRegistry
 from src.generator import answer
 from src.feedback_store import (
     init_feedback_db,
@@ -49,11 +50,14 @@ _ranker: Optional[EnsembleRanker] = None
 _config: Optional[RAGConfig] = None
 _logger = None
 _topic_extractor: Optional[TopicExtractor] = None
+_registry: Optional[DocumentRegistry] = None
 
 
 class SourceItem(BaseModel):
     page: int
     text: str
+    document: str = "unknown"  # Display name of the document
+    doc_type: str = "document"  # Type of document (e.g., "document", "slides")
     
     class Config:
         frozen = True  # Makes the model hashable so it can be used in sets
@@ -169,7 +173,7 @@ def _retrieve_and_rank(query: str, top_k: Optional[int] = None):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize artifacts on startup."""
-    global _artifacts, _retrievers, _ranker, _config, _logger, _topic_extractor
+    global _artifacts, _retrievers, _ranker, _config, _logger, _topic_extractor, _registry
 
     config_path = _resolve_config_path()
     if not config_path.exists():
@@ -207,6 +211,10 @@ async def lifespan(app: FastAPI):
             weights=_config.ranker_weights,
             rrf_k=int(_config.rrf_k),
         )
+        
+        # Load document registry
+        _registry = DocumentRegistry(artifacts_dir)
+        print(f"✓ Loaded document registry with {len(_registry.get_all())} documents")
 
         init_feedback_db()
         if _config.enable_topic_extraction:
@@ -402,10 +410,20 @@ async def chat_stream(request: ChatRequest):
                 pages = page_nums.get(i, [1]) or [1]
 
                 print(f"[DEBUG] i={i} pages={pages!r} page_nums_has_key={i in page_nums}", flush=True)
+                
+                # Get document info from registry
+                doc_record = _registry.get_by_chunk_id(i) if _registry else None
 
                 for page in pages:
                     chunks_by_page.setdefault(page, []).append(chunks[i])
-                    sources_used.add(SourceItem(page=page, text=source_text))
+                    # Create SourceItem with document info
+                    source_item = SourceItem(
+                        page=page,
+                        text=source_text,
+                        document=doc_record.display_name if doc_record else "unknown",
+                        doc_type=doc_record.doc_type if doc_record else "document"
+                    )
+                    sources_used.add(source_item)
             
             yield f"data: {json.dumps({'type': 'sources', 'content': [s.dict() for s in sources_used]})}\n\n"
             yield f"data: {json.dumps({'type': 'chunks_by_page', 'content': chunks_by_page})}\n\n"
@@ -553,13 +571,28 @@ async def chat(request: ChatRequest):
         for i in topk_idxs[:max_chunks]:
             source_text = sources[i]
             pages = page_nums.get(i, [1])
+            
+            # Get document info from registry
+            doc_record = _registry.get_by_chunk_id(i) if _registry else None
 
             if isinstance(pages, list):
                 for page in pages:
-                    sources_used.add(SourceItem(page=int(page), text=source_text))
+                    source_item = SourceItem(
+                        page=int(page),
+                        text=source_text,
+                        document=doc_record.display_name if doc_record else "unknown",
+                        doc_type=doc_record.doc_type if doc_record else "document"
+                    )
+                    sources_used.add(source_item)
                     chunks_by_page.setdefault(int(page), []).append(chunks[i])
             elif isinstance(pages, int):
-                sources_used.add(SourceItem(page=int(pages), text=source_text))
+                source_item = SourceItem(
+                    page=int(pages),
+                    text=source_text,
+                    document=doc_record.display_name if doc_record else "unknown",
+                    doc_type=doc_record.doc_type if doc_record else "document"
+                )
+                sources_used.add(source_item)
                 chunks_by_page.setdefault(int(pages), []).append(chunks[i])
             else: # Error case
                 print(f"Unexpected page number format for chunk index {i}: {pages}")

@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from src.config import RAGConfig
+from src.document_registry import DocumentRegistry
 from src.generator import answer, double_answer, dedupe_generated_text
 from src.index_builder import build_index
 from src.instrumentation.logging import get_logger
@@ -32,7 +33,7 @@ ANSWER_NOT_FOUND = "I'm sorry, but I don't have enough information to answer tha
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Welcome to TokenSmith!")
-    parser.add_argument("mode", choices=["index", "chat"], help="operation mode")
+    parser.add_argument("mode", choices=["index", "chat", "docs"], help="operation mode")
     parser.add_argument("--pdf_dir", default="data/chapters/", help="directory containing PDF files")
     parser.add_argument("--index_prefix", default="textbook_index", help="prefix for generated index files")
     parser.add_argument("--model_path", help="path to generation model")
@@ -51,30 +52,70 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def run_index_mode(args: argparse.Namespace, cfg: RAGConfig):
+    """Index mode: extract, chunk, and build indexes for all markdown files."""
     strategy = cfg.get_chunk_strategy()
     chunker = DocumentChunker(strategy=strategy, keep_tables=args.keep_tables)
     artifacts_dir = cfg.get_artifacts_directory()
-
+    
+    # Find all markdown files matching --extracted_markdown.md pattern
     data_dir = pathlib.Path("data")
     print(f"Looking for markdown files in {data_dir.resolve()}...")
-    md_files = sorted(data_dir.glob("*.md"))
+    
+    # Find all files ending with --extracted_markdown.md
+    md_files = sorted(data_dir.glob("*--extracted_markdown.md"))
+    
+    if not md_files:
+        # Fall back to all .md files if no --extracted_markdown.md files found
+        print("  No *--extracted_markdown.md files found, checking for *.md files...")
+        md_files = sorted(data_dir.glob("*.md"))
+    
     print(f"Found {len(md_files)} markdown files.")
-    print(f"First 5 markdown files: {[str(f) for f in md_files[:5]]}")
-
+    if md_files:
+        print(f"Files: {[f.name for f in md_files]}")
+    
     if not md_files:
         print("ERROR: No markdown files found in data/.", file=sys.stderr)
         sys.exit(1)
-
+    
+    # Create document registry
+    registry = DocumentRegistry(artifacts_dir)
+    print(f"✓ Created document registry at {registry.db_path}")
+    
+    # Clear previous entries
+    registry.clear()
+    print("✓ Cleared previous document entries")
+    
+    # Build index with all markdown files
+    print(f"\n📚 Indexing {len(md_files)} document(s)...")
     build_index(
-        markdown_file=str(md_files[0]),
+        markdown_files=[str(f) for f in md_files],
         chunker=chunker,
         chunk_config=cfg.chunk_config,
         embedding_model_path=cfg.embed_model,
         artifacts_dir=artifacts_dir,
         index_prefix=args.index_prefix,
+        registry=registry,
         use_multiprocessing=args.multiproc_indexing,
         use_headings=args.embed_with_headings,
     )
+    
+    # Print registry summary
+    print("\n" + "="*80)
+    print("📖 DOCUMENT REGISTRY SUMMARY")
+    print("="*80)
+    registry.print_summary()
+
+def run_docs_mode(args: argparse.Namespace, cfg: RAGConfig):
+    """Docs mode: display registered documents and their metadata."""
+    artifacts_dir = cfg.get_artifacts_directory()
+    
+    # Load registry
+    registry = DocumentRegistry(artifacts_dir)
+    
+    print("\n" + "="*80)
+    print("📖 INDEXED DOCUMENTS")
+    print("="*80)
+    registry.print_summary()
 
 def use_indexed_chunks(question: str, chunks: list) -> list:
     # Logic for keyword matching from textbook index
@@ -360,6 +401,8 @@ def main():
     print(f"Loaded configuration from {config_path.resolve()}.")
     if args.mode == "index":
         run_index_mode(args, cfg)
+    elif args.mode == "docs":
+        run_docs_mode(args, cfg)
     elif args.mode == "chat":
         run_chat_session(args, cfg)
 
