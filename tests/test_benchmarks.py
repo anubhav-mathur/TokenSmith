@@ -74,9 +74,10 @@ def run_benchmark(benchmark, config, results_dir, scorer):
     question = benchmark["question"]
     expected_answer = benchmark["expected_answer"]
     keywords = benchmark.get("keywords", [])
-    threshold = config["threshold_override"] or benchmark["similarity_threshold"] or 0.6 
+    threshold = config["threshold_override"] or benchmark["similarity_threshold"] or 0.6
     golden_chunks = benchmark.get("golden_chunks", None)
     ideal_retrieved_chunks = benchmark.get("ideal_retrieved_chunks", None)
+    ground_truth_doc_type = benchmark.get("ground_truth_doc_type", None)
 
     # Print header
     print(f"\n{'─'*60}")
@@ -111,7 +112,7 @@ def run_benchmark(benchmark, config, results_dir, scorer):
     
     # Calculate scores
     try:
-        scores = scorer.calculate_scores(retrieved_answer, expected_answer, keywords, question=question, ideal_retrieved_chunks=ideal_retrieved_chunks, actual_retrieved_chunks=chunks_info)
+        scores = scorer.calculate_scores(retrieved_answer, expected_answer, keywords, question=question, ideal_retrieved_chunks=ideal_retrieved_chunks, actual_retrieved_chunks=chunks_info, ground_truth_doc_type=ground_truth_doc_type)
     except Exception as e:
         error_msg = f"Scoring error: {e}"
         print(f"  ❌ FAILED: {error_msg}")

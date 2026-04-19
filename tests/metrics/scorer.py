@@ -25,41 +25,54 @@ class SimilarityScorer:
         
         return active
     
-    def calculate_scores(self, answer: str, expected: str, keywords: Optional[List[str]] = None, question: Optional[str] = None, ideal_retrieved_chunks: Optional[List[int]] = None, actual_retrieved_chunks: Optional[List[int]] = None) -> Dict[str, Any]:
+    def calculate_scores(self, answer: str, expected: str, keywords: Optional[List[str]] = None,
+                         question: Optional[str] = None,
+                         ideal_retrieved_chunks: Optional[List[int]] = None,
+                         actual_retrieved_chunks: Optional[List[int]] = None,
+                         ground_truth_doc_type: Optional[str] = None) -> Dict[str, Any]:
         """Calculate scores using active metrics."""
         active_metrics = self._get_active_metrics()
-        
+
         if not active_metrics:
             return {"error": "No metrics available"}
-        
+
         scores = {}
         total_weighted_score = 0.0
         total_weight = 0.0
-        
+
         for name, metric in active_metrics.items():
-            # For LLM judge metrics, pass question instead of expected answer
             if name in ("llm_judge", "async_llm_judge") and question:
                 score = metric.calculate(answer, question, keywords)
             elif name == "chunk_retrieval":
-                score = metric.calculate(ideal_retrieved_chunks, actual_retrieved_chunks)
+                detailed = metric.calculate_detailed(ideal_retrieved_chunks, actual_retrieved_chunks)
+                score = detailed["f1"]
+                scores["chunk_retrieval_precision"] = detailed["precision"]
+                scores["chunk_retrieval_recall"]    = detailed["recall"]
+                scores["chunk_retrieval_f1"]        = detailed["f1"]
+                scores["chunk_retrieval_count"]     = detailed["count"]
+            elif name == "source_purity":
+                detailed = metric.calculate_detailed(actual_retrieved_chunks, ground_truth_doc_type)
+                score = detailed["purity"]
+                scores["source_purity_correct"] = detailed["correct_count"]
+                scores["source_purity_total"]   = detailed["total_count"]
             else:
                 score = metric.calculate(answer, expected, keywords)
             scores[f"{name}_similarity"] = score
-            
+
             weight = metric.weight
             # Only include metrics with non-zero weight in final score
             if weight > 0:
                 total_weighted_score += score * weight
                 total_weight += weight
-        
+
         final_score = total_weighted_score / total_weight if total_weight > 0 else 0.0
-        
+
         if keywords:
             answer_lower = answer.lower()
             keywords_matched = sum(1 for kw in keywords if kw.lower() in answer_lower)
         else:
             keywords_matched = 0
-        
+
         return {
             **scores,
             "final_score": final_score,

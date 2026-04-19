@@ -33,12 +33,18 @@ ANSWER_NOT_FOUND = "I'm sorry, but I don't have enough information to answer tha
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Welcome to TokenSmith!")
-    parser.add_argument("mode", choices=["index", "chat", "docs"], help="operation mode")
+    parser.add_argument("mode", choices=["index", "chat", "docs", "set-weight"], help="operation mode")
     parser.add_argument("--pdf_dir", default="data/chapters/", help="directory containing PDF files")
     parser.add_argument("--index_prefix", default="textbook_index", help="prefix for generated index files")
     parser.add_argument("--model_path", help="path to generation model")
     parser.add_argument("--system_prompt_mode", choices=["baseline", "tutor", "concise", "detailed"], default="baseline")
     
+    weight_group = parser.add_argument_group("set-weight options")
+    weight_group.add_argument("--doc-id", type=int, default=None,
+                              help="doc_id of the document to update (omit to list all)")
+    weight_group.add_argument("--weight", type=float, default=1.0,
+                              help="new weight multiplier for the document (default: 1.0)")
+
     indexing_group = parser.add_argument_group("indexing options")
     indexing_group.add_argument("--keep_tables", action="store_true")
     indexing_group.add_argument("--multiproc_indexing", action="store_true")
@@ -117,6 +123,31 @@ def run_docs_mode(args: argparse.Namespace, cfg: RAGConfig):
     print("="*80)
     registry.print_summary()
 
+def run_set_weight_mode(args: argparse.Namespace, cfg: RAGConfig):
+    """Set-weight mode: adjust the ranking weight for a registered document."""
+    artifacts_dir = cfg.get_artifacts_directory()
+    registry = DocumentRegistry(artifacts_dir)
+
+    if args.doc_id is None:
+        print("\nNo --doc-id provided. Current document registry:")
+        print("="*80)
+        registry.print_summary()
+        print("\nUsage: python -m src.main set-weight --doc-id <ID> --weight <VALUE>")
+        return
+
+    doc = registry.get_by_id(args.doc_id)
+    if not doc:
+        print(f"ERROR: No document found with doc_id={args.doc_id}")
+        print("\nRegistered documents:")
+        registry.print_summary()
+        sys.exit(1)
+
+    old_weight = doc.weight
+    registry.set_weight_by_id(args.doc_id, args.weight)
+    print(f"✓ Weight updated for '{doc.display_name}' (doc_id={args.doc_id}): "
+          f"{old_weight:.2f} → {args.weight:.2f}")
+
+
 def use_indexed_chunks(question: str, chunks: list) -> list:
     # Logic for keyword matching from textbook index
     try:
@@ -155,6 +186,7 @@ def get_answer(
     sources = artifacts["sources"]
     retrievers = artifacts["retrievers"]
     ranker = artifacts["ranker"]
+    _registry = artifacts.get("registry")
     # Ensure these locals exist for all control flows to avoid UnboundLocalError
     ranked_chunks: List[str] = []
     topk_idxs: List[int] = []
@@ -187,8 +219,9 @@ def get_answer(
         # print("Raw scores from retrievers:")
         # for retriever_name, score_dict in raw_scores.items():
         #     print(f"  {retriever_name}: {list(score_dict.values())}")
-        # Step 2: Ranking
-        ordered, scores = ranker.rank(raw_scores=raw_scores)
+        # Step 2: Ranking (apply per-document weights if registry is available)
+        weight_map = _registry.get_weight_map() if _registry else None
+        ordered, scores = ranker.rank(raw_scores=raw_scores, weight_map=weight_map)
         # print(f"Ordered candidate indices after ranking: {ordered[:cfg.top_k]}")
         # print(f"Corresponding scores: {scores[:cfg.top_k]}")
         topk_idxs = filter_retrieved_chunks(cfg, chunks, ordered)
@@ -334,7 +367,8 @@ def run_chat_session(args: argparse.Namespace, cfg: RAGConfig):
         
         ranker = EnsembleRanker(ensemble_method=cfg.ensemble_method, weights=cfg.ranker_weights, rrf_k=int(cfg.rrf_k))
         print("Loaded retrievers and initialized ranker.")
-        artifacts = {"chunks": chunks, "sources": sources, "retrievers": retrievers, "ranker": ranker, "meta": meta}
+        chat_registry = DocumentRegistry(artifacts_dir)
+        artifacts = {"chunks": chunks, "sources": sources, "retrievers": retrievers, "ranker": ranker, "meta": meta, "registry": chat_registry}
     except Exception as e:
         print(f"ERROR: {e}. Run 'index' mode first.")
         sys.exit(1)
@@ -403,6 +437,8 @@ def main():
         run_index_mode(args, cfg)
     elif args.mode == "docs":
         run_docs_mode(args, cfg)
+    elif args.mode == "set-weight":
+        run_set_weight_mode(args, cfg)
     elif args.mode == "chat":
         run_chat_session(args, cfg)
 

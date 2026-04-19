@@ -35,14 +35,20 @@ class AsyncLLMJudgeMetric(MetricBase):
         if log_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             log_dir = Path("logs") / timestamp
-        
+
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.results_file = self.log_dir / "async_llm_results.json"
-        
-        # Initialize client once
+
+        self._available = False
         if not _initialized:
-            _lazy_init()
+            try:
+                _lazy_init()
+                self._available = True
+            except Exception:
+                pass  # is_available() will return False; registry will skip this metric
+        else:
+            self._available = True
     
     @property
     def name(self) -> str:
@@ -53,7 +59,7 @@ class AsyncLLMJudgeMetric(MetricBase):
         return 0.0
     
     def is_available(self) -> bool:
-        return True
+        return self._available
     
     def calculate(self, answer: str, expected: str, keywords: Optional[List[str]] = None) -> float:
         """

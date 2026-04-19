@@ -16,14 +16,20 @@ class MetricRegistry:
             KeywordMatchMetric,
             NLIEntailmentMetric,
             AsyncLLMJudgeMetric,
-            ChunkRetrievalMetric
+            ChunkRetrievalMetric,
+            SourcePurityMetric,
         )
 
         self.register(SemanticSimilarityMetric())
         self.register(KeywordMatchMetric())
         self.register(NLIEntailmentMetric())
-        self.register(AsyncLLMJudgeMetric())
+        try:
+            self.register(AsyncLLMJudgeMetric())
+        except Exception as exc:
+            print(f"Warning: AsyncLLMJudgeMetric could not be initialized "
+                  f"({str(exc)[:120]}). Skipping.")
         self.register(ChunkRetrievalMetric())
+        self.register(SourcePurityMetric())
 
     def register(self, metric: MetricBase):
         """Register a new metric."""

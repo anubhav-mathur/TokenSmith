@@ -42,6 +42,150 @@ from src.user_feedback_model import TopicExtractor, estimate_difficulty
 # Constants
 INDEX_PREFIX = "textbook_index"
 
+# ---- Source routing: patterns → doc_type ---------------------------------
+# Only phrases that explicitly reference a source trigger routing.
+
+_SOURCE_ROUTING_PATTERNS = [
+    # "what does the textbook/slides/paper say/cover/..."
+    (re.compile(r'\bwhat does (the )?textbook\b', re.I), 'document'),
+    (re.compile(r'\bwhat does (the )?(slides?|lecture)\b', re.I), 'slides'),
+    (re.compile(r'\bwhat does (the )?paper\b', re.I), 'paper'),
+    # "according to the textbook/slides/paper"
+    (re.compile(r'\baccording to (the )?textbook\b', re.I), 'document'),
+    (re.compile(r'\baccording to (the )?(slides?|lecture)\b', re.I), 'slides'),
+    (re.compile(r'\baccording to (the )?paper\b', re.I), 'paper'),
+    # "in/from the textbook/slides/paper"
+    (re.compile(r'\b(in|from) (the )?textbook\b', re.I), 'document'),
+    (re.compile(r'\b(in|from) (the )?(slides?|lecture( slides?)?)\b', re.I), 'slides'),
+    (re.compile(r'\b(in|from) (the )?(paper|article|research paper)\b', re.I), 'paper'),
+    # "textbook says/covers/explains/..."
+    (re.compile(r'\btextbook (says?|covers?|explains?|mentions?|discusses?)\b', re.I), 'document'),
+    (re.compile(r'\b(slides?|lecture) (says?|covers?|shows?|explains?|mentions?)\b', re.I), 'slides'),
+    (re.compile(r'\bpaper (says?|covers?|explains?|mentions?|discusses?)\b', re.I), 'paper'),
+    # "covered/discussed in lecture/slides/textbook"
+    (re.compile(r'\b(covered|discussed|mentioned|presented) in (the )?(slides?|lecture)\b', re.I), 'slides'),
+    (re.compile(r'\b(covered|discussed|mentioned|presented) in (the )?textbook\b', re.I), 'document'),
+]
+
+
+def detect_source_filter(query: str) -> Optional[str]:
+    """
+    Return a doc_type ('document', 'slides', 'paper') if the query explicitly
+    references a specific source. Returns None if no routing is needed.
+    """
+    for pattern, doc_type in _SOURCE_ROUTING_PATTERNS:
+        if pattern.search(query):
+            return doc_type
+    return None
+
+
+# ---- Implicit source routing: keyword index built from registry at startup --
+
+# Words too generic to use as routing keywords even if they appear in a name.
+_IMPLICIT_ROUTING_STOPWORDS = {
+    "text", "book",            # halves of "Textbook"
+    "note", "notes",           # "lecture notes"
+    "part", "unit", "vol",     # structural words
+    "with", "from", "that",    # function words
+    "this", "about",
+}
+
+
+def build_implicit_routing_index(registry) -> List:
+    """
+    Build a list of (compiled_pattern, doc_id) pairs from the registry.
+
+    For each document, candidate keywords are extracted from its display_name
+    and filename stem. A keyword is only turned into a routing pattern if it
+    belongs to exactly one document (uniqueness check), which prevents broad
+    subject terms that appear across many files from triggering false routes.
+
+    Returns:
+        List of (re.Pattern, doc_id) pairs.
+    """
+    docs = registry.get_all()
+    doc_candidates: Dict[int, set] = {}
+
+    for doc in docs:
+        words: set = set()
+
+        # Words from display_name (>=4 chars, not a stopword)
+        for raw in re.split(r'[\s\-_]+', doc.display_name):
+            w = raw.strip('.,()[]')
+            if len(w) >= 4 and w.lower() not in _IMPLICIT_ROUTING_STOPWORDS:
+                words.add(w)
+
+        # Words from filename stem (>=5 chars) — catches names like "Concurrency"
+        stem = pathlib.Path(doc.filename).stem
+        if stem.endswith('--extracted_markdown'):
+            stem = stem[:-len('--extracted_markdown')]
+        for raw in re.split(r'[\s\-_]+', stem):
+            w = raw.strip('.,()[]')
+            if len(w) >= 5 and w.lower() not in _IMPLICIT_ROUTING_STOPWORDS:
+                words.add(w)
+
+        doc_candidates[doc.doc_id] = words
+
+    # Uniqueness check: only keep words that appear in exactly one document
+    word_doc_count: Dict[str, set] = {}
+    for doc_id, words in doc_candidates.items():
+        for w in words:
+            key = w.lower()
+            word_doc_count.setdefault(key, set()).add(doc_id)
+
+    routing_index: List = []
+    for doc_id, words in doc_candidates.items():
+        for w in words:
+            if len(word_doc_count.get(w.lower(), set())) == 1:
+                pattern = re.compile(r'\b' + re.escape(w) + r'\b', re.I)
+                routing_index.append((pattern, doc_id))
+
+    return routing_index
+
+
+def detect_implicit_source(query: str, routing_index: List) -> Optional[int]:
+    """
+    Return a specific doc_id if the query contains keywords unique to that
+    document. If multiple documents match equally, returns None (ambiguous).
+    """
+    match_counts: Dict[int, int] = {}
+    for pattern, doc_id in routing_index:
+        if pattern.search(query):
+            match_counts[doc_id] = match_counts.get(doc_id, 0) + 1
+
+    if not match_counts:
+        return None
+
+    max_count = max(match_counts.values())
+    top = [doc_id for doc_id, count in match_counts.items() if count == max_count]
+    return top[0] if len(top) == 1 else None
+
+
+def _get_chunk_ids_for_doc_id(doc_id: int) -> Optional[set]:
+    """Return chunk ID set for a specific document, or None if not found."""
+    if not _registry:
+        return None
+    doc = _registry.get_by_id(doc_id)
+    if not doc:
+        return None
+    return set(range(doc.chunk_start, doc.chunk_end + 1))
+
+
+def _get_chunk_ids_for_doc_type(doc_type: str) -> Optional[set]:
+    """
+    Return the set of chunk IDs belonging to all documents of the given
+    doc_type, or None if the registry is unavailable / no match found.
+    """
+    if not _registry:
+        return None
+    matching_docs = [d for d in _registry.get_all() if d.doc_type == doc_type]
+    if not matching_docs:
+        return None
+    chunk_ids: set = set()
+    for doc in matching_docs:
+        chunk_ids.update(range(doc.chunk_start, doc.chunk_end + 1))
+    return chunk_ids
+
 
 # Global state populated during app lifespan
 _artifacts: Optional[Dict[str, List[str]]] = None
@@ -51,6 +195,7 @@ _config: Optional[RAGConfig] = None
 _logger = None
 _topic_extractor: Optional[TopicExtractor] = None
 _registry: Optional[DocumentRegistry] = None
+_implicit_routing_index: List = []  # populated in lifespan after registry loads
 
 
 class SourceItem(BaseModel):
@@ -159,7 +304,36 @@ def _retrieve_and_rank(query: str, top_k: Optional[int] = None):
     for retriever in _retrievers:
         raw_scores[retriever.name] = retriever.get_scores(query, pool_n, chunks)
 
-    ordered_ids, ordered_scores = _ranker.rank(raw_scores=raw_scores)
+    # Pass 1: explicit source routing — phrase patterns → doc_type
+    detected_type = detect_source_filter(query)
+    if detected_type:
+        allowed_ids = _get_chunk_ids_for_doc_type(detected_type)
+        if allowed_ids:
+            raw_scores = {
+                name: {k: v for k, v in scores.items() if k in allowed_ids}
+                for name, scores in raw_scores.items()
+            }
+            print(f"[Source routing] Explicit: doc_type='{detected_type}', "
+                  f"filtering to {len(allowed_ids)} chunk IDs")
+        else:
+            print(f"[Source routing] Explicit: doc_type='{detected_type}' "
+                  f"but no documents of that type in registry — skipping filter")
+    else:
+        # Pass 2: implicit source routing — keyword index → specific doc_id
+        detected_doc_id = detect_implicit_source(query, _implicit_routing_index)
+        if detected_doc_id is not None:
+            allowed_ids = _get_chunk_ids_for_doc_id(detected_doc_id)
+            if allowed_ids:
+                raw_scores = {
+                    name: {k: v for k, v in scores.items() if k in allowed_ids}
+                    for name, scores in raw_scores.items()
+                }
+                print(f"[Source routing] Implicit: doc_id={detected_doc_id}, "
+                      f"filtering to {len(allowed_ids)} chunk IDs")
+
+    # Per-document weight adjustment: multiply fused scores by document weights
+    weight_map = _registry.get_weight_map() if _registry else None
+    ordered_ids, ordered_scores = _ranker.rank(raw_scores=raw_scores, weight_map=weight_map)
 
     if top_k is not None:
         ordered_ids = ordered_ids[:top_k]
@@ -173,7 +347,7 @@ def _retrieve_and_rank(query: str, top_k: Optional[int] = None):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize artifacts on startup."""
-    global _artifacts, _retrievers, _ranker, _config, _logger, _topic_extractor, _registry
+    global _artifacts, _retrievers, _ranker, _config, _logger, _topic_extractor, _registry, _implicit_routing_index
 
     config_path = _resolve_config_path()
     if not config_path.exists():
@@ -214,7 +388,13 @@ async def lifespan(app: FastAPI):
         
         # Load document registry
         _registry = DocumentRegistry(artifacts_dir)
-        print(f"✓ Loaded document registry with {len(_registry.get_all())} documents")
+        docs = _registry.get_all()
+        print(f"✓ Loaded document registry with {len(docs)} documents")
+
+        # Build implicit source routing index from registry keywords
+        _implicit_routing_index = build_implicit_routing_index(_registry)
+        print(f"✓ Built implicit routing index: {len(_implicit_routing_index)} patterns "
+              f"across {len(docs)} document(s)")
 
         init_feedback_db()
         if _config.enable_topic_extraction:

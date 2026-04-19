@@ -171,7 +171,7 @@ def config(pytestconfig):
         # Testing
         "artifacts_dir": pytestconfig.getoption("--artifacts_dir") or "index/tokens-200",
         "index_prefix": pytestconfig.getoption("--index-prefix") or cfg.get("index_prefix", "textbook_index"),
-        "metrics": pytestconfig.getoption("--metrics") or cfg.get("metrics", ["all"]),
+        "metrics": [m.strip() for item in (pytestconfig.getoption("--metrics") or cfg.get("metrics", ["all"])) for m in (item if isinstance(item, str) else str(item)).split(",") if m.strip()],
         "threshold_override": pytestconfig.getoption("--threshold") or cfg.get("threshold_override", None),
         
         # Query Enhancement (HyDE)

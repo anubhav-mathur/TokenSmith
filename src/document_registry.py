@@ -210,10 +210,38 @@ class DocumentRegistry:
             weight=row['weight'],
         )
     
+    def get_by_id(self, doc_id: int) -> Optional[DocumentRecord]:
+        """
+        Find a document by its primary key.
+
+        Args:
+            doc_id: The integer doc_id to look up
+
+        Returns:
+            DocumentRecord if found, None otherwise
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM documents WHERE doc_id = ? LIMIT 1", (doc_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return DocumentRecord(
+            doc_id=row['doc_id'],
+            filename=row['filename'],
+            display_name=row['display_name'],
+            doc_type=row['doc_type'],
+            indexed_at=row['indexed_at'],
+            chunk_start=row['chunk_start'],
+            chunk_end=row['chunk_end'],
+            chunk_count=row['chunk_count'],
+            page_count=row['page_count'],
+            weight=row['weight'],
+        )
+
     def set_weight(self, filename: str, weight: float):
         """
         Update the weight for a document.
-        
+
         Args:
             filename: The document filename
             weight: The new weight value
@@ -222,6 +250,21 @@ class DocumentRegistry:
         cursor.execute(
             "UPDATE documents SET weight = ? WHERE filename = ?",
             (weight, filename)
+        )
+        self.conn.commit()
+
+    def set_weight_by_id(self, doc_id: int, weight: float):
+        """
+        Update the weight for a document identified by doc_id.
+
+        Args:
+            doc_id: The integer primary key of the document
+            weight: The new weight value
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE documents SET weight = ? WHERE doc_id = ?",
+            (weight, doc_id)
         )
         self.conn.commit()
     

@@ -5,7 +5,7 @@ This module supports ranking strategies applied after chunk retrieval.
 """
 
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # typedef Candidate as base, we might change this into a class later
 # Each candidate is identified by its global index into `chunks`
@@ -28,9 +28,21 @@ class EnsembleRanker:
         if active_weights != 1.0:
             raise ValueError(f"Weights for active retrivers must sum to 1.0. Current sum: {active_weights}")
 
-    def rank(self, raw_scores: Dict[str, Dict[Candidate, float]]) -> Tuple[List[int], List[float]]:
+    def rank(
+        self,
+        raw_scores: Dict[str, Dict[Candidate, float]],
+        weight_map: Optional[Dict[int, float]] = None,
+    ) -> Tuple[List[int], List[float]]:
         """
         Executes the rank fusion process on the provided raw scores.
+
+        Args:
+            raw_scores: Per-retriever score dicts, keyed by retriever name.
+            weight_map: Optional per-chunk document weight multipliers
+                (chunk_id -> weight). When provided, each fused score is
+                multiplied by its document weight before final sorting, so
+                chunks from higher-weighted documents rank proportionally
+                higher. Chunks absent from the map default to weight 1.0.
         """
         # Collect scores from each active retriever
         per_retriever_scores: Dict[str, Dict[Candidate, float]] = {}
@@ -47,6 +59,16 @@ class EnsembleRanker:
             ordered_ids, ordered_scores = self._weighted_linear_fuse(per_retriever_scores)
         else:
             raise NotImplementedError(f"Ranking method '{self.ensemble_method}' is not implemented.")
+
+        # Apply per-document weight multipliers after fusion
+        if weight_map:
+            weighted = [
+                (cand, score * weight_map.get(cand, 1.0))
+                for cand, score in zip(ordered_ids, ordered_scores)
+            ]
+            weighted.sort(key=lambda x: x[1], reverse=True)
+            ordered_ids = [int(cand) for cand, _ in weighted]
+            ordered_scores = [float(score) for _, score in weighted]
 
         return ordered_ids, ordered_scores
     

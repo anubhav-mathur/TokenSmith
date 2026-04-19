@@ -175,7 +175,8 @@ def build_index(
     all_chunks: List[str] = []
     sources: List[str] = []
     metadata: List[Dict] = []
-    
+    skipped_chunks: List[Dict] = []
+
     # Convert artifacts_dir to Path
     artifacts_dir = pathlib.Path(artifacts_dir)
 
@@ -223,38 +224,55 @@ def build_index(
             
             # Iterate through each chunk produced from this section
             for sub_chunk_id, sub_chunk in enumerate(sub_chunks):
+                # Clean sub_chunk by removing page markers
+                clean_chunk = re.sub(page_pattern, '', sub_chunk).strip()
+
+                # Split the sub_chunk by page markers (needed for page tracking)
+                fragments = page_pattern.split(sub_chunk)
+
+                # Skip introduction chunks before page mapping so they never
+                # get stale IDs in page_to_chunk_ids. Still advance current_page
+                # so subsequent sections get correct page numbers.
+                if c["heading"] == "Introduction":
+                    for j in range(1, len(fragments), 2):
+                        try:
+                            new_page = int(fragments[j]) + 1
+                            current_page = new_page
+                            page_count = max(page_count, new_page)
+                        except (IndexError, ValueError):
+                            continue
+                    skipped_chunks.append({
+                        "file":         markdown_file,
+                        "section":      c["heading"],
+                        "sub_chunk_id": sub_chunk_id,
+                        "global_id":    total_chunks,
+                        "reason":       "Introduction section filtered before embedding",
+                        "preview":      clean_chunk[:80],
+                    })
+                    continue
+
                 # Track all pages this specific chunk touches
                 chunk_pages = set()
-                
-                # Split the sub_chunk by page markers
-                fragments = page_pattern.split(sub_chunk)
-                
+
                 # If there is content before the first page marker,
                 # it belongs to the current_page.
                 if fragments[0].strip():
-                    page_to_chunk_ids.setdefault(current_page, set()).add(total_chunks + sub_chunk_id)
+                    page_to_chunk_ids.setdefault(current_page, set()).add(total_chunks)
                     chunk_pages.add(current_page)
-                
+
                 # Process the new pages found within this sub_chunk
                 for j in range(1, len(fragments), 2):
                     try:
                         new_page = int(fragments[j]) + 1
                         if fragments[j+1].strip():
-                            page_to_chunk_ids.setdefault(new_page, set()).add(total_chunks + sub_chunk_id)
+                            page_to_chunk_ids.setdefault(new_page, set()).add(total_chunks)
                             chunk_pages.add(new_page)
-                        
+
                         current_page = new_page
                         page_count = max(page_count, new_page)
                     except (IndexError, ValueError):
                         continue
-                
-                # Clean sub_chunk by removing page markers
-                clean_chunk = re.sub(page_pattern, '', sub_chunk).strip()
-                
-                # Skip introduction chunks for embedding
-                if c["heading"] == "Introduction":
-                    continue
-                
+
                 # Prepare metadata
                 meta = {
                     "filename": markdown_file,
@@ -265,9 +283,9 @@ def build_index(
                     "section_path": full_section_path,
                     "text_preview": clean_chunk[:100],
                     "page_numbers": sorted(list(chunk_pages)),
-                    "chunk_id": total_chunks + sub_chunk_id
+                    "chunk_id": total_chunks
                 }
-                
+
                 # Prepare chunk with prefix
                 if use_headings:
                     chunk_prefix = (
@@ -276,12 +294,11 @@ def build_index(
                     )
                 else:
                     chunk_prefix = ""
-                
+
                 all_chunks.append(chunk_prefix + clean_chunk)
                 sources.append(markdown_file)
                 metadata.append(meta)
-            
-            total_chunks += len(sub_chunks)
+                total_chunks += 1  # only count embedded chunks
         
         # Track document in registry
         chunk_end = total_chunks - 1
@@ -317,6 +334,22 @@ def build_index(
         elif registry:
             print(f"  ⚠ Skipped {markdown_file}: no chunks after filtering")
     
+    # Chunk mismatch diagnostic
+    embedded_count = len(all_chunks)
+    if skipped_chunks:
+        print(f"\n[Chunk mismatch diagnostic] {len(skipped_chunks)} chunk(s) counted in "
+              f"registry but excluded before embedding:")
+        for s in skipped_chunks:
+            print(f"  global_id={s['global_id']:4d}  file={pathlib.Path(s['file']).name}"
+                  f"  section='{s['section']}'  reason={s['reason']}")
+            print(f"    preview: {s['preview']!r}")
+        print(f"  Registry total : {total_chunks} chunks")
+        print(f"  FAISS total    : {embedded_count} vectors")
+        print(f"  Gap            : {total_chunks - embedded_count}")
+    else:
+        print("[Chunk mismatch diagnostic] No chunks filtered before embedding — "
+              "registry and FAISS counts should match.")
+
     # Convert the sets to sorted lists for clean output
     final_map = {}
     for page, id_set in page_to_chunk_ids.items():
